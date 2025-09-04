@@ -1,0 +1,18 @@
+[project]
+name = "virtualtrainer"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "cstruct>=6.1",
+    "influxdb-client>=1.49.0",
+    "mqtt>=0.0.1",
+    "neurokit2>=0.2.12",
+    "numpy>=2.3.2",
+    "paho-mqtt>=2.1.0",
+    "pyqtgraph>=0.13.7",
+    "pyside6==6.9.1",
+    "qasync==0.27.1",
+    "tornado==6.5.1",
+    "zmq>=0.0.0",
+]
