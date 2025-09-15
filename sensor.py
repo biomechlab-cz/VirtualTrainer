@@ -209,7 +209,7 @@ class Sensor(threading.Thread):
             self.emg_raw.extend(emg_uv)          # µV
             self.emg_clean.extend(clean_emg_uv)  # µV
             self.emg_env.extend(env)
-            self.time_emu.extend(emg_time)
+            self.time_emu.extend(emg_time) # TODO: Ověřit extrapolaci času - v influxu nejsou časy vzorků rovnoměrně
 
             if max_env > self.mvc:
                 self.mvc = max_env
@@ -285,6 +285,7 @@ class Sensor(threading.Thread):
             # batch write
             self.server.influx.write(points)
 
+    # TODO: Ověřit obálku - do influxu klidně posílat Hilbertovu obálku, do modelu 200 Hz 1 sekundu z Neurokitu
     def emg_envelope(self, _clean_emg: np.ndarray, history_seconds: float = 2.0, min_history_samples: int = 32) -> np.ndarray:
         x = np.asarray(_clean_emg, dtype=np.float32).reshape(-1)
         n = x.size
@@ -320,7 +321,7 @@ class Sensor(threading.Thread):
         logging.info(f"Sensor id {self.device_id} (position {self.position}) has reset its MVC")
 
     # ------------------------------------------------------------------
-    def snapshot(self):
+    def snapshot(self): # TODO: Doplnit určené parametry podle https://docs.google.com/document/d/19UeT0tX7oSPupByxA30gNaGhILO0bvwa/edit?usp=sharing&ouid=107420772597417870596&rtpof=true&sd=true
         """Returns last values without copying the whole buffer."""
         with self.status_lock:
             return {

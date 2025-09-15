@@ -320,4 +320,4 @@ class Madgwick9D:
 
 
 class OrientationEstimator(Madgwick9D):
-    pass
+    pass # TODO Ověřit funkčnost

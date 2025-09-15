@@ -4,3 +4,5 @@ class Exercise:
 
     def describe(self):
         return {}
+
+# TODO: Implementovat model pro hodnocení Wide squat - https://github.com/MautnerVo/Hydronaut

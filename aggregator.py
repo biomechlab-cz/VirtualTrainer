@@ -68,5 +68,6 @@ class Aggregator(threading.Thread):
         with self._exercise:
             if exercise:
                 self._exercise = exercise
+# TODO Načtení odpovídající classy pro hodnocení cvičení (exercise.py) a použití modelu pro hodnocení Wide squat
             else:
                 self._exercise = None
