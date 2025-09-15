@@ -8,7 +8,7 @@ from common import stop_event, threading
 from server import Server
 from mqtt import Mqtt
 
-from influxdb import InfluxWriter, URL as IFX_URL, TOKEN as IFX_TOKEN, ORG as IFX_ORG, BUCKET as IFX_BUCKET  # <- NEW
+from influxdb import InfluxWriter, URL as IFX_URL, TOKEN as IFX_TOKEN, ORG as IFX_ORG, BUCKET as IFX_BUCKET
 
 def main():
     parser = argparse.ArgumentParser()
@@ -27,15 +27,6 @@ def main():
     parser.add_argument("--influx-batch-size", type=int, default=5000)
     parser.add_argument("--influx-flush-ms", type=int, default=1000)
 
-    parser.add_argument("--emg-filter", action="store_true",
-                        help="Enable EMG software filtering (step DC + high-pass)")
-    parser.add_argument("--emg-hp", type=float, default=common.CLEAN_HP_FC_HZ,
-                        help="EMG high-pass cutoff [Hz]")
-    parser.add_argument("--emg-step-win", type=int, default=common.STEP_HOLD_MS,
-                        help="Window (samples) for step detection")
-    parser.add_argument("--emg-step-thr-uv", type=float, default=common.STEP_THR_uV,
-                        help="Step threshold in microvolts")
-
     parser.add_argument("--ads-vref", type=float, default=common.ADS1292_VREF,
                         help="ADS1292 reference voltage [V]")
     parser.add_argument("--ads-gain", type=int, default=common.ADS1292_PGA,
@@ -43,11 +34,6 @@ def main():
 
 
     args = parser.parse_args()
-
-    common.EMG_FILTER_ENABLED = bool(args.emg_filter)
-    common.EMG_HP_FC_HZ = float(args.emg_hp)
-    common.EMG_STEP_WIN = int(args.emg_step_win)
-    common.EMG_STEP_THR_uV = float(args.emg_step_thr_uv)
 
     common.ADS1292_VREF = float(args.ads_vref)
     common.ADS1292_PGA = int(args.ads_gain)

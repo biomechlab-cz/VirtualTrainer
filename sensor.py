@@ -1,6 +1,7 @@
 import logging
 import socket
 import time
+from itertools import islice
 
 import numpy as np
 from collections import deque
@@ -24,12 +25,7 @@ CHUNK_SECONDARY = CHUNK_PRIMARY // 10   # IMU samples in packet
 EMG_FS = 1000  # 1 kHz
 IMU_FS = 100  # 100 Hz
 ENVELOPE_WIN = 100
-ENVELOPE_KERNEL = np.ones(ENVELOPE_WIN) / ENVELOPE_WIN
 
-
-def emg_envelope(_clean_emg: np.ndarray) -> np.ndarray:
-    env = np.abs(_clean_emg)
-    return np.convolve(env, ENVELOPE_KERNEL, mode='same')
 
 
 class Sensor(threading.Thread):
@@ -58,12 +54,6 @@ class Sensor(threading.Thread):
         self.imu_quat = deque(maxlen=IMU_FS * self.BUFFER_SECONDS)
         self.time_emu = deque(maxlen=EMG_FS * self.BUFFER_SECONDS)
         self.time_imu = deque(maxlen=IMU_FS * self.BUFFER_SECONDS)
-
-        # Original optional cleaning path
-        if common.EMG_FILTER_ENABLED:
-            self._emg_step = StepBaseline(win=common.EMG_STEP_WIN, step_thr_uv=common.EMG_STEP_THR_uV)
-            self._emg_hp = HighPassEMA(fs=EMG_FS, fc=common.EMG_HP_FC_HZ)
-            self._emg_hampel = Hampel(win=40, k=2.0)
 
 
         # Motion gating state (bridges 100 Hz IMU to 1 kHz EMG)
@@ -202,17 +192,9 @@ class Sensor(threading.Thread):
         emg_counts = np.asarray(d.emg_data_arr, dtype=np.int32)
         emg_uv = scale_ads1292_counts_to_uV(emg_counts)
 
-        # Optional original cleaning path for "clean" channel
-        if common.EMG_FILTER_ENABLED:
-            x0 = self._emg_hampel.process(emg_uv)
-            x1 = self._emg_step.process(x0)
-            clean_emg_uv = self._emg_hp.process(x1)
-        else:
-            # Lightweight HP to keep clean channel around zero baseline
-            clean_emg_uv = nk.emg_clean(emg_uv, sampling_rate=EMG_FS)
+        clean_emg_uv = nk.emg_clean(emg_uv, sampling_rate=EMG_FS)
 
-
-        env = emg_envelope(clean_emg_uv)
+        env = self.emg_envelope(clean_emg_uv)
 
         max_env = np.max(env)
 
@@ -303,6 +285,28 @@ class Sensor(threading.Thread):
             # batch write
             self.server.influx.write(points)
 
+    def emg_envelope(self, _clean_emg: np.ndarray, history_seconds: float = 2.0, min_history_samples: int = 32) -> np.ndarray:
+        x = np.asarray(_clean_emg, dtype=np.float32).reshape(-1)
+        n = x.size
+        hist_len = max(int(history_seconds * EMG_FS), int(min_history_samples))
+
+        # Pull last `hist_len` samples from the deque (efficiently).
+        hsize = len(self.emg_clean)
+        if hsize > 0 and hist_len > 0:
+            start = max(0, hsize - hist_len)
+            # islice avoids copying the entire deque
+            h = np.fromiter(islice(self.emg_clean, start, hsize), dtype=np.float32, count=hsize - start)
+            full = np.concatenate([h, x]) if h.size > 0 else x
+        else:
+            full = x
+
+        amp_full = nk.emg_amplitude(full)
+        amp_full = np.asarray(amp_full, dtype=np.float32)
+
+        # Return only the tail corresponding to the current block
+        return amp_full[-n:]
+
+
     def reset_orientation(self):
         with self.status_lock:
             self.orientation.reset()
@@ -374,92 +378,3 @@ def scale_ads1292_counts_to_uV(raw_counts: "np.ndarray[int32]") -> "np.ndarray[f
     lsb_V = common.ADS1292_VREF / (common.ADS1292_PGA * (2**23))
     return (raw_counts.astype(np.float32) * (lsb_V * 1e6)).astype(np.float32)
 
-
-# ---------------- Original helpers kept ----------------
-
-class Hampel:
-    """Hampel outlier filter: sliding window, replace by median when |x-m|>k·MAD."""
-    def __init__(self, win=20, k=2.0):
-        self.win = int(win)
-        self.k = float(k)
-        self.buf = np.zeros(self.win, np.float32)
-        self.i = 0
-        self.full = False
-
-    def process(self, x: np.ndarray) -> np.ndarray:
-        out = np.empty_like(x, np.float32)
-        for n, v in enumerate(x.astype(np.float32)):
-            self.buf[self.i] = v
-            self.i = (self.i + 1) % self.win
-            if not self.full and self.i == 0:
-                self.full = True
-
-            if self.full:
-                m = np.median(self.buf)
-                mad = np.median(np.abs(self.buf - m)) + 1e-9
-                thr = self.k * 1.4826 * mad
-                out[n] = m if abs(v - m) > thr else v
-            else:
-                out[n] = v
-        return out
-
-
-class StepBaseline:
-    """Baseline with hysteresis; limits 'chattering' when a step is detected."""
-    def __init__(self, win=200, step_thr_uv=80.0, hold=10):
-        self.buf = np.zeros(win, np.float32)
-        self.win = int(win)
-        self.step_thr = float(step_thr_uv)
-        self.hold = int(hold)
-        self.i = 0
-        self.full = False
-        self.baseline = 0.0
-        self.over_cnt = 0
-
-    def process(self, x_uv: np.ndarray) -> np.ndarray:
-        out = np.empty_like(x_uv, np.float32)
-        for n, v in enumerate(x_uv):
-            d = v - self.baseline
-            # hysteresis: shift baseline only after a few consecutive exceedances
-            if abs(d) > self.step_thr:
-                self.over_cnt += 1
-                if self.over_cnt >= self.hold:
-                    self.baseline += d
-                    self.over_cnt = 0
-            else:
-                self.over_cnt = 0
-
-            out[n] = v - self.baseline
-            # robust baseline (median window)
-            self.buf[self.i] = v
-            self.i = (self.i + 1) % self.win
-            if not self.full and self.i == 0:
-                self.full = True
-            if self.full:
-                self.baseline = np.median(self.buf)
-        return out
-
-
-class HighPassEMA:
-    """
-    First-order (EMA) HP: y[n] = a*(y[n-1] + x[n] - x[n-1]),  a = tau/(tau+dt)
-    Stable, SciPy-free, adequate for 1 kHz EMG.
-    """
-    def __init__(self, fs, fc):
-        dt = 1.0 / float(fs)
-        tau = 1.0 / (2.0 * np.pi * float(fc))
-        self.a = tau / (tau + dt)
-        self.x1 = 0.0
-        self.y1 = 0.0
-
-    def process(self, x: np.ndarray) -> np.ndarray:
-        y = np.empty_like(x, dtype=np.float32)
-        a = self.a
-        x1 = self.x1
-        y1 = self.y1
-        for i, xi in enumerate(x.astype(np.float32)):
-            yi = a * (y1 + xi - x1)
-            y[i] = yi
-            x1, y1 = xi, yi
-        self.x1, self.y1 = x1, y1
-        return y
