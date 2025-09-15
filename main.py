@@ -1,14 +1,18 @@
 # main.py
 import argparse
-
+import subprocess
+from pathlib import Path
 import common
 import logging
+import sys
+import os
 
 from common import stop_event, threading
 from server import Server
 from mqtt import Mqtt
 
 from influxdb import InfluxWriter, URL as IFX_URL, TOKEN as IFX_TOKEN, ORG as IFX_ORG, BUCKET as IFX_BUCKET
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -27,11 +31,12 @@ def main():
     parser.add_argument("--influx-batch-size", type=int, default=5000)
     parser.add_argument("--influx-flush-ms", type=int, default=1000)
 
+    parser.add_argument("--gui", action="store_true", help="Launch GUI in separate process")
+
     parser.add_argument("--ads-vref", type=float, default=common.ADS1292_VREF,
                         help="ADS1292 reference voltage [V]")
     parser.add_argument("--ads-gain", type=int, default=common.ADS1292_PGA,
                         help="ADS1292 PGA gain (1,2,3,4,6,8,12)")
-
 
     args = parser.parse_args()
 
@@ -44,6 +49,40 @@ def main():
     )
 
     mqtt = Mqtt(args.mqtt_host, args.mqtt_port, args.mqtt_data_topic, args.mqtt_control_topic)
+
+    # Spawn GUI process if requested
+    if args.gui:
+        gui_entry = Path(__file__).with_name("vt_gui.py")
+        if not gui_entry.exists():
+            raise FileNotFoundError(f"GUI script not found: {gui_entry}")
+
+        # Base command
+        exe = sys.executable
+        cmd = [exe, str(gui_entry)]
+
+        # On Windows, use pythonw.exe so there's no console window for the GUI process
+        if os.name == "nt":
+            if exe.lower().endswith("python.exe"):
+                cmd[0] = exe[:-10] + "pythonw.exe"  # swap to pythonw.exe
+
+        kwargs = dict(close_fds=True, cwd=str(Path(__file__).parent))
+
+        if os.name == "nt":
+            # detach from this console & hide any window
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            kwargs["startupinfo"] = si
+            stdin = stdout = stderr = subprocess.DEVNULL
+        else:
+            # POSIX - start a brand-new session and disconnect stdio
+            kwargs["start_new_session"] = True
+            stdin = stdout = stderr = subprocess.DEVNULL
+
+        subprocess.Popen(cmd, stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
 
     influx = None
     if args.influx_enable:
@@ -66,6 +105,7 @@ def main():
         for t in threading.enumerate():
             if t is not threading.current_thread():
                 t.join(timeout=2)
+
 
 if __name__ == "__main__":
     main()
