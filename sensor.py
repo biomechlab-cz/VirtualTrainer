@@ -27,7 +27,6 @@ IMU_FS = 100  # 100 Hz
 ENVELOPE_WIN = 100
 
 
-
 class Sensor(threading.Thread):
     """Handles communication with sensor."""
 
@@ -330,6 +329,16 @@ class Sensor(threading.Thread):
                 "mvcp": round(self.emg_env[-1] / self.mvc * 100) if (len(self.emg_env) and self.mvc > 0) else "N/A",
                 "quat_wxyz": self.imu_quat[-1].tolist() if len(self.imu_quat) else "N/A"
             }
+
+    def get_model_data(self):
+        with self.status_lock:
+            if len(self.emg_raw) > 1000 and len(self.imu_quat) > 100:
+                return {
+                    "emg_raw": np.array(list(self.emg_raw)[-1000:], dtype=np.float32),
+                    "imu_quat": np.array(list(self.imu_quat)[-100:], dtype=np.float32)
+                }
+            else:
+                return None
 
     def close(self):
         with self.status_lock:
