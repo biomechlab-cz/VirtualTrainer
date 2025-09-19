@@ -244,8 +244,8 @@ class MVCPVisualizer(QMainWindow):
             if 'sensors' in data:
                 for muscle_name, sensor_data in data['sensors'].items():
                     if muscle_name in self.mvcp_data and 'mvcp' in sensor_data:
-                        new_value = float(sensor_data['mvcp'])
-                        if self.mvcp_data[muscle_name] != new_value:
+                        new_value = self._to_float_or_none(sensor_data['mvcp'])
+                        if new_value is not None and self.mvcp_data[muscle_name] != new_value:
                             self.mvcp_data[muscle_name] = new_value
                             changed_muscles_this_update.add(muscle_name)
             # Handle exercise phase for wide squat
@@ -317,7 +317,7 @@ class MVCPVisualizer(QMainWindow):
                 self.previous_mvcp_data[muscle] = self.mvcp_data[muscle]
 
             changed_list = ", ".join(self.changed_muscles)
-            print(f"Chart updated for muscles: {changed_list}")  # Debug message
+#            print(f"Chart updated for muscles: {changed_list}")  # Debug message
 
             self.changed_muscles.clear()
 
@@ -376,6 +376,18 @@ class MVCPVisualizer(QMainWindow):
         from datetime import datetime
         return datetime.now().isoformat()
 
+    def _to_float_or_none(self, x):
+        if x is None:
+            return None
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip()
+        if s == "" or s.upper() in ("N/A", "NA", "NULL", "NONE"):
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
 
     def _update_categories_and_barset(self):
         """Ensure axis categories and bar set length match self.muscle_groups."""
