@@ -1,7 +1,8 @@
 import time
 import threading
+import logging
 
-from exercise import Exercise
+from exercise import create_exercise
 from common import stop_event
 from sensor import Sensor, current_millis
 
@@ -16,12 +17,15 @@ class Aggregator(threading.Thread):
         self.rate_hz = rate_hz
         self.running = True
 
+        # Initialize standard sensors for exercise tracking
         self.sensors = {
             "Biceps": None,
             "Triceps": None,
             "Quadriceps": None,
             "Gastrocnemius": None
         }
+        # Dictionary for additional sensors (not used in exercise tracking)
+        self.additional_sensors = {}
         self.all_active = False
 
         self._exercise = None
@@ -47,6 +51,7 @@ class Aggregator(threading.Thread):
 
                 model_data = {}
 
+                # Process standard exercise sensors
                 for pos, sensor in self.sensors.items():
                     if sensor:
                         payload["sensors"][pos] = sensor.snapshot()
@@ -54,18 +59,22 @@ class Aggregator(threading.Thread):
                     else:
                         payload["sensors"][pos] = {"status": "N/A"}
                         model_data[pos] = None
+                
+                # Process additional sensors
+                for pos, sensor in self.additional_sensors.items():
+                    if sensor:
+                        payload["sensors"][pos] = sensor.snapshot()
 
                 # Check if all sensors are "Active"
                 self.check_all_sensors_active(payload["sensors"])
 
-                # Make predictions only if all sensors are active
+                # Get exercise description if all sensors are active
                 if self.all_active and self._exercise and all(v is not None for v in model_data.values()):
-                    phase = self._exercise.predict_wide_squat_phase(data=model_data)
-                    if len(phase) > 0:
-                        payload["exercise_description"]["phase"] = int(phase[0])
+                    payload["exercise_description"] = self._exercise.describe(model_data)
 
-            # Publish
-            self.server.mqtt.send_payload(payload)
+            # Publish data via MQTT if enabled
+            if self.server.mqtt:
+                self.server.mqtt.send_payload(payload)
 
             # Sleep to match max rate
             t = time.time() - start
@@ -73,10 +82,14 @@ class Aggregator(threading.Thread):
                 time.sleep(period - t)
 
     def check_new_sensors(self):
-        for pos in POSITIONS_ALLOWED:
-            sensor = self.server.active_sensors.get(pos)
-            if sensor:
+        # Process all active sensors
+        for pos, sensor in self.server.active_sensors.items():
+            if pos in POSITIONS_ALLOWED:
+                # Standard exercise sensors
                 self.sensors[pos] = sensor
+            else:
+                # Additional sensors (only for data collection)
+                self.additional_sensors[pos] = sensor
 
     def check_all_sensors_active(self, sensors):
         self.all_active = all(
@@ -84,8 +97,12 @@ class Aggregator(threading.Thread):
             for sensor in sensors.values()
         )
 
-    def set_exercise(self, exercise):
-        if exercise:
-            self._exercise = Exercise(name=exercise)
+    def set_exercise(self, exercise_name):
+        if exercise_name:
+            try:
+                self._exercise = create_exercise(exercise_name)
+            except ValueError as e:
+                logging.warning(f"Failed to create exercise: {e}")
+                self._exercise = None
         else:
             self._exercise = None
