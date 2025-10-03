@@ -8,7 +8,7 @@ from sensor import Sensor
 
 
 class Server:
-    def __init__(self, host, port, mqtt, influx=None):
+    def __init__(self, host, port, mqtt, influx=None, influx_emg_fs: int = 1000):
         self.host = host
         self.port = port
         self.mqtt = mqtt
@@ -18,6 +18,7 @@ class Server:
         self.active_sensors = {}  # position->Sensor
         self.aggregator = Aggregator(self)
         self.aggregator.start()
+        self.influx_emg_fs = int(influx_emg_fs)
 
 
     def serve_forever(self):
@@ -55,10 +56,15 @@ class Server:
                 if s and s.connected:
                     s.reset_orientation()
 
-        if cmd == "reset_mvc":
+        if cmd == "mvc_start":
             for pos, s in list(self.all_sensors.items()):
                 if s and s.connected:
-                    s.reset_mvc()
+                    s.mvc_start()
+
+        if cmd == "mvc_stop":
+            for pos, s in list(self.all_sensors.items()):
+                if s and s.connected:
+                    s.mvc_stop()
 
         if cmd == "set_exercise":
             self.aggregator.set_exercise(payload.get("val"))

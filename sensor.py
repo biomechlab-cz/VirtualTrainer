@@ -9,7 +9,7 @@ from collections import deque
 import neurokit2 as nk
 
 import aggregator
-from orientation import Mahony9D
+from orientation import OrientationEstimator
 
 import common
 
@@ -42,9 +42,11 @@ class Sensor(threading.Thread):
         self.device_id = None
         self.device_name = None
 
-        self.orientation = Mahony9D()
+        self.orientation = OrientationEstimator()
 
         self.mvc = 1
+
+        self.mvc_capture = 0
 
         # Circular buffers: deque with maxlen = fs * 10 s
         self.emg_raw = deque(maxlen=EMG_FS * self.BUFFER_SECONDS)
@@ -66,6 +68,12 @@ class Sensor(threading.Thread):
 
         logging.info("Sensor thread init from %s", addr)
 
+    def mvc_start(self):
+        self.mvc_capture = 1
+        self.mvc = 1
+
+    def mvc_stop(self):
+        self.mvc_capture = 0
 
     # ------------------------------------------------------------------
     # Low-level recv loop
@@ -195,7 +203,7 @@ class Sensor(threading.Thread):
 
         env = self.emg_envelope(clean_emg_uv)
 
-        max_env = np.max(env)
+        max_env = np.min(env)
 
         dt = 1.0 / IMU_FS
         quats = np.empty((CHUNK_SECONDARY, 4), dtype=np.float32)
@@ -210,7 +218,7 @@ class Sensor(threading.Thread):
             self.emg_env.extend(env)
             self.time_emu.extend(emg_time) # TODO: Ověřit extrapolaci času - v influxu nejsou časy vzorků rovnoměrně
 
-            if max_env > self.mvc:
+            if self.mvc_capture and max_env > self.mvc:
                 self.mvc = max_env
 
             self.imu_quat.extend(quats)
@@ -245,7 +253,8 @@ class Sensor(threading.Thread):
                 )
 
             # EMG 100× (raw + clean + envelope)
-            for i in range(CHUNK_PRIMARY):
+            emg_throttle = 1 if getattr(self.server, 'influx_emg_fs', 1000) >= 1000 else 5
+            for i in range(0, CHUNK_PRIMARY, emg_throttle):
                 t = int(emg_time[i])
                 # raw (µV)
                 points.append(
