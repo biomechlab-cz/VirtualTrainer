@@ -8,11 +8,12 @@ from sensor import Sensor
 
 
 class Server:
-    def __init__(self, host, port, mqtt, influx=None, influx_emg_fs: int = 1000):
+    def __init__(self, host, port, mqtt=None, influx=None, influx_emg_fs: int = 1000):
         self.host = host
         self.port = port
         self.mqtt = mqtt
-        self.mqtt.set_control_handler(self._handle_control)
+        if self.mqtt:
+            self.mqtt.set_control_handler(self._handle_control)
         self.influx = influx
         self.all_sensors = {}  # position->Sensor
         self.active_sensors = {}  # position->Sensor

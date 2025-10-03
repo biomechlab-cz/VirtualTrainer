@@ -24,7 +24,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0", help="TCP bind host")
     parser.add_argument("--port", type=int, default=8888, help="TCP bind port")
-    parser.add_argument("--mqtt-host", required=True, help="MQTT broker host")
+    
+    # Make MQTT optional with a flag
+    parser.add_argument("--disable-mqtt", action="store_true", help="Disable MQTT functionality")
+    parser.add_argument("--mqtt-host", help="MQTT broker host")
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--mqtt-data-topic", default="virtualtrainer/data", help="MQTT topic for data")
     parser.add_argument("--mqtt-control-topic", default="virtualtrainer/control", help="MQTT topic for control")
@@ -48,6 +51,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate arguments
+    if not args.disable_mqtt and not args.mqtt_host:
+        parser.error("--mqtt-host is required unless --disable-mqtt is specified")
+
     common.ADS1292_VREF = float(args.ads_vref)
     common.ADS1292_PGA = int(args.ads_gain)
 
@@ -55,8 +62,6 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
     )
-
-    mqtt = Mqtt(args.mqtt_host, args.mqtt_port, args.mqtt_data_topic, args.mqtt_control_topic)
 
     # Spawn GUI process if requested
     if args.gui:
@@ -99,6 +104,10 @@ def main():
             batch_size=args.influx_batch_size, flush_interval_ms=args.influx_flush_ms
         )
 
+    mqtt = None
+    if not args.disable_mqtt:
+        mqtt = Mqtt(args.mqtt_host, args.mqtt_port, args.mqtt_data_topic, args.mqtt_control_topic)
+
     server = Server(args.host, args.port, mqtt, influx, influx_emg_fs=args.influx_emg_fs)
     try:
         server.serve_forever()
@@ -106,7 +115,8 @@ def main():
         logging.info("Shutting down...")
 
         stop_event.set()
-        mqtt.close()
+        if mqtt:
+            mqtt.close()
         if influx:
             influx.close()
 
