@@ -54,24 +54,27 @@ class ExerciseWideSquat(Exercise):
     def quaternion_to_euler(self, q):
         """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees"""
         # Extract quaternion components
-        w, x, y, z = q
+        if isinstance(q, np.ndarray) and q.ndim == 2:
+            w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        else:
+            w, x, y, z = q
 
         # Roll (rotation around X)
         sinr_cosp = 2.0 * (w * x + y * z)
         cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-        roll = math.atan2(sinr_cosp, cosr_cosp)
+        roll = np.arctan2(sinr_cosp, cosr_cosp)
 
         # Pitch (rotation around Y)
         sinp = 2.0 * (w * y - z * x)
-        pitch = math.asin(np.clip(sinp, -1.0, 1.0))
+        pitch = np.arcsin(np.clip(sinp, -1.0, 1.0))
 
         # Yaw (rotation around Z)
         siny_cosp = 2.0 * (w * z + x * y)
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
 
-        # Convert to degrees
-        return np.array([math.degrees(angle) for angle in [roll, pitch, yaw]])
+        # Convert to degrees and stack
+        return np.rad2deg(np.column_stack([roll, pitch, yaw]) if isinstance(q, np.ndarray) and q.ndim == 2 else np.array([roll, pitch, yaw]))
 
     def update_quaternion_buffer(self, data):
         """Update the quaternion buffer with new sensor data"""
@@ -85,9 +88,9 @@ class ExerciseWideSquat(Exercise):
         if len(self.quat_buffer) < min_samples:
             return None
 
-        # Convert quaternions to Euler angles
-        euler_angles = [self.quaternion_to_euler(q) for q in list(self.quat_buffer)]
-        return np.array(euler_angles)
+        # Convert buffer to numpy array for vectorized operations
+        quat_array = np.array(list(self.quat_buffer))
+        return self.quaternion_to_euler(quat_array)
 
     def find_movement_peaks(self, euler_angles):
         """Find peaks in yaw and roll angles"""
@@ -120,61 +123,42 @@ class ExerciseWideSquat(Exercise):
             return "good", "good", "good", "good"  # Not enough data to evaluate
 
         peak_data = self.find_movement_peaks(euler_angles)
-        
-        # Evaluate technique (amplitude consistency)
-        technique_status = "good"
+
+        # Initialize all statuses as good
+        technique_status = tempo_status = fluidity_status = squat_depth_status = "good"
+
+        # Evaluate technique using vectorized operations
         for heights in [peak_data['yaw_heights'], peak_data['roll_heights']]:
-            if len(heights) >= 2:  # Need at least 2 peaks to compare
-                # Compare consecutive peak amplitudes
-                amplitude_diffs = np.abs(np.diff(heights))
-                if np.any(amplitude_diffs > 10.0):  # More than 10° difference
-                    technique_status = "bad"
-                    break
-        
-        # Evaluate tempo (timing consistency)
-        tempo_status = "good"
+            if len(heights) >= 2 and np.any(np.abs(np.diff(heights)) > 10.0):
+                technique_status = "bad"
+                break
+
+        # Evaluate tempo using vectorized operations
         for peaks in [peak_data['yaw_peaks'], peak_data['roll_peaks']]:
-            if len(peaks) >= 4:  # Need at least 4 peaks to get 3 periods
-                # Calculate time between peaks
-                periods = np.diff(peaks) / IMU_FS  # Convert to seconds
-                
-                # Check if the difference between any periods is more than 0.3 seconds
-                period_diffs = np.abs(np.diff(periods))
-                if np.any(period_diffs > 0.3):
+            if len(peaks) >= 4:
+                periods = np.diff(peaks) / IMU_FS
+                if np.any(np.abs(np.diff(periods)) > 0.3):
                     tempo_status = "bad"
                     break
-        
-        # Evaluate movement fluidity
-        fluidity_status = "good"
-        # Only evaluate during active movement (between first and last peak)
-        for angle_name, peaks in [('yaw', peak_data['yaw_peaks']), ('roll', peak_data['roll_peaks'])]:
-            if len(peaks) >= 2:  # Need at least two peaks to define movement period
+
+        # Evaluate movement fluidity with optimized algorithm
+        for angle_idx, peaks in [(2, peak_data['yaw_peaks']), (0, peak_data['roll_peaks'])]:
+            if len(peaks) >= 2:
                 # Get the angles during the movement period
-                start_idx = peaks[0]
-                end_idx = peaks[-1]
-                angles = euler_angles[start_idx:end_idx + 1]
-                
-                # Check yaw or roll depending on current iteration
-                angle_idx = 2 if angle_name == 'yaw' else 0  # 2 for yaw, 0 for roll
-                angle_values = angles[:, angle_idx]
-                
-                # Calculate consecutive differences
+                angle_values = euler_angles[peaks[0]:peaks[-1] + 1, angle_idx]
                 diffs = np.abs(np.diff(angle_values))
                 
-                # Check for sequence of 10 consecutive differences > 2°
-                for i in range(len(diffs) - 9):  # Need 10 consecutive values
-                    if np.all(diffs[i:i+10] > 2.0):
+                # Use strided array to check sequences of 10 values efficiently
+                if len(diffs) >= 10:
+                    # Create view of array with rolling windows of size 10
+                    windows = np.lib.stride_tricks.sliding_window_view(diffs, 10)
+                    if np.any(np.all(windows > 2.0, axis=1)):
                         fluidity_status = "bad"
                         break
-                
-                if fluidity_status == "bad":
-                    break
 
-        # Evaluate squat depth based on negative yaw peaks
-        squat_depth_status = "good"
+        # Evaluate squat depth using vectorized operations
         if 'neg_yaw_heights' in peak_data and len(peak_data['neg_yaw_heights']) > 1:
-            if np.any(peak_data['neg_yaw_heights'] > 0):  # Negative peaks should be below 0°
-                squat_depth_status = "bad"
+            squat_depth_status = "bad" if np.any(peak_data['neg_yaw_heights'] > 0) else "good"
 
         return technique_status, tempo_status, fluidity_status, squat_depth_status
 
