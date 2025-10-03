@@ -319,5 +319,24 @@ class Madgwick9D:
         return self.q.copy()
 
 
-class OrientationEstimator(Madgwick9D):
-    pass # TODO Ověřit funkčnost
+class OrientationEstimatorMadgwick(Madgwick9D):
+    pass
+
+class OrientationEstimator(Mahony9D):
+    pass
+
+
+def make_orientation_estimator(algorithm: str = "madgwick", **kwargs):
+    """
+    Convenience factory:
+      - algorithm="madgwick" -> OrientationEstimator (Madgwick9D-based)
+      - algorithm="mahony"   -> OrientationEstimatorMahony (Mahony9D-based)
+    Any **kwargs are forwarded to the estimator (including auto_init params).
+    """
+    algo = (algorithm or "madgwick").lower()
+    if algo in ("madgwick", "mg", "mad"):
+        return OrientationEstimatorMadgwick(**kwargs)
+    elif algo in ("mahony", "mh", "mah"):
+        return OrientationEstimator(**kwargs)
+    else:
+        raise ValueError(f"Unknown algorithm '{algorithm}'. Use 'madgwick' or 'mahony'.")
