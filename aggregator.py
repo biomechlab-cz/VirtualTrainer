@@ -61,7 +61,8 @@ class Aggregator(threading.Thread):
                 # Make predictions only if all sensors are active
                 if self.all_active and self._exercise and all(v is not None for v in model_data.values()):
                     phase = self._exercise.predict_wide_squat_phase(data=model_data)
-                    payload["exercise_description"]["phase"] = phase
+                    if len(phase) > 0:
+                        payload["exercise_description"]["phase"] = int(phase[0])
 
             # Publish
             self.server.mqtt.send_payload(payload)

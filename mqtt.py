@@ -3,7 +3,6 @@ import logging
 import paho.mqtt.client as mqtt
 
 
-# TODO Vytvořit skript s GUI, který bude pro jednotlivé svalové skupiny ukazovat MVC% (třeba v Bar chartu), umožní resetovat MVC a orientaci (přes MQTT).
 class Mqtt:
     def __init__(self, host, port, data_topic, control_topic):
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, userdata={"data_topic": data_topic,
