@@ -1,4 +1,10 @@
 # main.py
+import warnings
+
+from neurokit2 import NeuroKitWarning
+
+warnings.filterwarnings("ignore", module="neurokit2", category=NeuroKitWarning)
+
 import argparse
 import subprocess
 from pathlib import Path
@@ -30,6 +36,8 @@ def main():
     parser.add_argument("--influx-bucket", default=IFX_BUCKET)
     parser.add_argument("--influx-batch-size", type=int, default=5000)
     parser.add_argument("--influx-flush-ms", type=int, default=1000)
+    parser.add_argument("--influx-emg-fs", type=int, choices=[1000, 200], default=1000,
+                        help="EMG write rate to InfluxDB (1000 or 200 Hz)")
 
     parser.add_argument("--gui", action="store_true", help="Launch GUI in separate process")
 
@@ -91,7 +99,7 @@ def main():
             batch_size=args.influx_batch_size, flush_interval_ms=args.influx_flush_ms
         )
 
-    server = Server(args.host, args.port, mqtt, influx)
+    server = Server(args.host, args.port, mqtt, influx, influx_emg_fs=args.influx_emg_fs)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
