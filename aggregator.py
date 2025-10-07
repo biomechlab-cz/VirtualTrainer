@@ -70,7 +70,7 @@ class Aggregator(threading.Thread):
 
                 # Get exercise description if all sensors are active
                 if self.all_active and self._exercise and all(v is not None for v in model_data.values()):
-                    payload["exercise_description"] = self._exercise.describe(model_data)
+                    payload["exercise_description"] = self._exercise.describe(model_data, payload["timestamp"])
 
             # Publish data via MQTT if enabled
             if self.server.mqtt:
