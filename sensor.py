@@ -99,12 +99,12 @@ class Sensor(threading.Thread):
                         self.position = (
                             init.position.decode("utf-8", "ignore").strip("\x00")
                         )
-                        if self.position not in aggregator.POSITIONS_ALLOWED:
-                            logging.warning(
-                                "Rejected unknown position %s from %s", self.position, self.addr
-                            )
-                            self.close()
-                            break
+                        # if self.position not in aggregator.POSITIONS_ALLOWED:
+                        #     logging.warning(
+                        #         "Rejected unknown position %s from %s", self.position, self.addr
+                        #     )
+                        #     self.close()
+                        #     break
 
                         self.device_id = init.device_id
                         self.device_name = f"device{self.device_id}"
@@ -117,9 +117,9 @@ class Sensor(threading.Thread):
 
                         self.server.active_sensors[self.position] = self
                     else:
-                        if self.position not in aggregator.POSITIONS_ALLOWED:
-                            self.close()
-                            break
+                        # if self.position not in aggregator.POSITIONS_ALLOWED:
+                        #     self.close()
+                        #     break
 
                         data = packet.unionData.data
                         self._handle_data(data, packet.batteryLevel)
