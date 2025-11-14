@@ -1,19 +1,21 @@
 import sys
 import json
 import threading
-from typing import Dict, Any
-from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout,
-                               QHBoxLayout, QWidget, QPushButton, QLabel)
-from PySide6.QtCore import QTimer, Signal, QObject, Qt
-from PySide6.QtGui import QFont, QColor
-from PySide6.QtCharts import (
-    QChart,
-    QChartView,
-    QBarSet,
-    QBarCategoryAxis,
-    QValueAxis,
-    QStackedBarSeries,
+from typing import Dict
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QVBoxLayout,
+    QHBoxLayout,
+    QWidget,
+    QPushButton,
+    QLabel,
+    QSizePolicy,
 )
+from PySide6.QtCore import QTimer, Signal, QObject, Qt, QRectF
+from PySide6.QtGui import QFont, QColor, QPainter, QPen
+
 import paho.mqtt.client as mqtt
 
 
@@ -88,6 +90,178 @@ class MQTTWorker(QObject):
                 print(f"Failed to send command: {e}")
 
 
+class BarChartWidget(QWidget):
+    """
+    Vlastní widget pro vykreslení sloupců:
+    - plynulá animace mezi starou a novou hodnotou
+    - barvy podle prahů (≤50 zelená, >50 oranžová, >80 červená)
+    - Phase vždy modrá
+    """
+
+    def __init__(self, categories, phase_key="Phase", parent=None):
+        super().__init__(parent)
+        self.categories = list(categories)
+        self.phase_key = phase_key
+
+        # cílové a aktuálně zobrazené hodnoty
+        self.values: Dict[str, float] = {}
+        self.display_values: Dict[str, float] = {}
+
+        # animační timer (cca 30 FPS)
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self.update_animation)
+        self.anim_timer.start(30)
+
+        # aby se widget roztahoval na maximum
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_data(self, categories, values: Dict[str, float]):
+        """
+        Nastaví nové kategorie a cílové hodnoty.
+        :param categories: pořadí sloupců (seznam názvů svalů + případně Phase)
+        :param values: dict {name: value}
+        """
+        self.categories = list(categories)
+
+        # odeber staré klíče, které už nejsou ve values
+        for k in list(self.values.keys()):
+            if k not in values:
+                del self.values[k]
+        for k in list(self.display_values.keys()):
+            if k not in values:
+                del self.display_values[k]
+
+        # nastav nové cíle
+        for k, v in values.items():
+            try:
+                v_float = float(v)
+            except Exception:
+                v_float = 0.0
+            v_float = max(0.0, min(100.0, v_float))  # clamp 0–100
+            self.values[k] = v_float
+            # při prvním výskytu nastavíme display = aktuální hodnota, ať to neskáče z nuly
+            if k not in self.display_values:
+                self.display_values[k] = v_float
+
+        self.update()
+
+    def update_animation(self):
+        """Posun display_values směrem k values pro plynulou animaci."""
+        if not self.values:
+            return
+
+        anything_changed = False
+        # jednoduchý „easing“: vždy o 15 % k cíli
+        alpha = 0.15
+
+        for k, target in self.values.items():
+            current = self.display_values.get(k, 0.0)
+            diff = target - current
+            if abs(diff) < 0.1:
+                new_val = target
+            else:
+                new_val = current + diff * alpha
+
+            if new_val != current:
+                anything_changed = True
+            self.display_values[k] = new_val
+
+        if anything_changed:
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = self.rect()
+        painter.fillRect(rect, self.palette().window())
+
+        if not self.categories:
+            return
+
+        # rozložení – menší okraje, aby graf víc využil výšku
+        left_margin = 50
+        right_margin = 20
+        top_margin = 10
+        bottom_margin = 28
+
+        chart_rect = QRectF(
+            left_margin,
+            top_margin,
+            rect.width() - left_margin - right_margin,
+            rect.height() - top_margin - bottom_margin,
+        )
+
+        # horizontální grid + popisky osy Y (0, 25, 50, 75, 100)
+        painter.setFont(QFont("Arial", 8))
+        for perc in [0, 25, 50, 75, 100]:
+            y = chart_rect.bottom() - chart_rect.height() * perc / 100.0
+            # grid line – tmavší
+            painter.setPen(QPen(QColor(180, 180, 180)))
+            painter.drawLine(chart_rect.left(), y, chart_rect.right(), y)
+            # label vlevo
+            painter.setPen(QPen(QColor(80, 80, 80)))
+            painter.drawText(
+                0,
+                int(y - 6),
+                left_margin - 5,
+                12,
+                Qt.AlignRight | Qt.AlignVCenter,
+                str(perc),
+            )
+
+        # sloupce
+        n = len(self.categories)
+        if n == 0:
+            return
+
+        slot_width = chart_rect.width() / n
+        # širší sloupce (cca 2× oproti původním)
+        bar_width = min(80.0, slot_width * 0.8)
+
+        for idx, cat in enumerate(self.categories):
+            val = self.display_values.get(cat, 0.0)
+            val = max(0.0, min(100.0, val))
+
+            x_center = chart_rect.left() + slot_width * (idx + 0.5)
+            bar_left = x_center - bar_width / 2
+            y_bottom = chart_rect.bottom()
+            bar_height = chart_rect.height() * val / 100.0
+            y_top = y_bottom - bar_height
+
+            # barva podle prahů, Phase vždy modrá
+            if cat == self.phase_key:
+                color = QColor("#2196F3")
+            else:
+                if val > 80.0:
+                    color = QColor("#F44336")  # red
+                elif val > 50.0:
+                    color = QColor("#FF9800")  # orange
+                else:
+                    color = QColor("#4CAF50")  # green
+
+            painter.setBrush(color)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(
+                QRectF(bar_left, y_top, bar_width, bar_height),
+                3,
+                3,
+            )
+
+            # název svalu pod sloupcem
+            painter.setPen(QPen(QColor(50, 50, 50)))
+            painter.setFont(QFont("Arial", 9))
+            label_rect = QRectF(
+                bar_left - 10,
+                chart_rect.bottom() + 2,
+                bar_width + 20,
+                bottom_margin - 2,
+            )
+            painter.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, cat)
+
+        painter.end()
+
+
 class MVCPVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -99,21 +273,20 @@ class MVCPVisualizer(QMainWindow):
 
         # Current MVCP values
         self.mvcp_data: Dict[str, float] = {muscle: 0.0 for muscle in self.muscle_groups}
-        # Previous MVCP values to track changes (not nutně potřeba, ale necháme)
+        # Previous MVCP values
         self.previous_mvcp_data: Dict[str, float] = {muscle: 0.0 for muscle in self.muscle_groups}
-        # Track which specific muscles have changed
+        # Track which specific muscles have changed (pro status text)
         self.changed_muscles = set()
 
-        # Setup MQTT worker in separate thread
+        # MQTT worker v separátním vlákně
         self.mqtt_worker = MQTTWorker()
         self.mqtt_thread = threading.Thread(target=self.setup_mqtt_worker, daemon=True)
         self.mqtt_thread.start()
 
-        # MVC capture toggle state
+        # Stavové příznaky
         self.is_mvc_setting = False
-        # Wide squat toggle state
         self.wide_squat_active = False
-        self.phase_key = 'Phase'
+        self.phase_key = "Phase"
         self.phase_raw = None
         self.phase_value = 0.0
 
@@ -129,8 +302,10 @@ class MVCPVisualizer(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        # Main layout
         main_layout = QVBoxLayout(central_widget)
+        # menší okraje, aby graf zabral víc výšky
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(4)
 
         # Title
         title_label = QLabel("Real-time MVCP Visualization")
@@ -138,9 +313,10 @@ class MVCPVisualizer(QMainWindow):
         title_label.setFont(QFont("Arial", 16, QFont.Bold))
         main_layout.addWidget(title_label)
 
-        # Chart setup
-        self.setup_chart()
-        main_layout.addWidget(self.chart_view)
+        # Náš vlastní bar chart widget – expanduje na maximum
+        self.bar_widget = BarChartWidget(self.muscle_groups, phase_key=self.phase_key, parent=self)
+        self.bar_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        main_layout.addWidget(self.bar_widget, stretch=1)
 
         # Control buttons
         button_layout = QHBoxLayout()
@@ -161,10 +337,8 @@ class MVCPVisualizer(QMainWindow):
                 background-color: #ff5252;
             }
         """)
-
         button_layout.addWidget(self.reset_mvc_btn)
 
-        # Wide squat toggle button (bottom-right)
         self.wide_squat_btn = QPushButton("Set wide squat")
         self.wide_squat_btn.clicked.connect(self.toggle_wide_squat)
         self.wide_squat_btn.setMinimumHeight(40)
@@ -181,8 +355,8 @@ class MVCPVisualizer(QMainWindow):
                 background-color: #4263eb;
             }
         """)
-
         button_layout.addWidget(self.wide_squat_btn)
+
         main_layout.addLayout(button_layout)
 
         # Status label
@@ -190,66 +364,12 @@ class MVCPVisualizer(QMainWindow):
         self.status_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.status_label)
 
-        # Timer for periodic updates
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.refresh_chart)
-        self.update_timer.start(100)  # Update every 100ms
+        # Inicialní vykreslení
+        self.update_chart()
 
-    def setup_chart(self):
-        """Setup the bar chart using QtCharts"""
-        # Create chart
-        self.chart = QChart()
-        self.chart.setTitle("MVCP by Muscle Group")
-        self.chart.setAnimationOptions(QChart.AnimationOption.SeriesAnimations)
-
-        # Use stacked bar series so that only one colored segment per category is visible
-        self.bar_series = QStackedBarSeries()
-
-        # Bar sets for different ranges and Phase
-        self.bar_set_green = QBarSet("≤ 50 %")
-        self.bar_set_orange = QBarSet("> 50 %")
-        self.bar_set_red = QBarSet("> 80 %")
-        self.bar_set_phase = QBarSet("Phase")
-
-        # Colors
-        self.bar_set_green.setColor(QColor("#4CAF50"))   # green
-        self.bar_set_orange.setColor(QColor("#FF9800"))  # orange
-        self.bar_set_red.setColor(QColor("#F44336"))     # red
-        self.bar_set_phase.setColor(QColor("#2196F3"))   # blue for Phase
-
-        # Initialize sets with zeros for existing muscles
-        for _ in self.muscle_groups:
-            self.bar_set_green.append(0.0)
-            self.bar_set_orange.append(0.0)
-            self.bar_set_red.append(0.0)
-            self.bar_set_phase.append(0.0)
-
-        # Add bar sets to series
-        self.bar_series.append(self.bar_set_green)
-        self.bar_series.append(self.bar_set_orange)
-        self.bar_series.append(self.bar_set_red)
-        self.bar_series.append(self.bar_set_phase)
-
-        # Add series to chart
-        self.chart.addSeries(self.bar_series)
-
-        # Create axes
-        self.axis_x = QBarCategoryAxis()
-        self.axis_x.append(self.muscle_groups)
-        self.chart.addAxis(self.axis_x, Qt.AlignBottom)
-        self.bar_series.attachAxis(self.axis_x)
-
-        self.axis_y = QValueAxis()
-        self.axis_y.setRange(0, 100)
-        self.axis_y.setTitleText("MVCP (%)")
-        self.chart.addAxis(self.axis_y, Qt.AlignLeft)
-        self.bar_series.attachAxis(self.axis_y)
-
-        # Create chart view
-        self.chart_view = QChartView(self.chart)
-
-        # Initial full refresh (nastaví hodnoty přes replace)
-        self.refresh_chart_full()
+    def update_chart(self):
+        """Předá aktuální data do BarChartWidgetu."""
+        self.bar_widget.set_data(self.muscle_groups, self.mvcp_data)
 
     def update_data(self, data):
         """Update MVCP data from MQTT message"""
@@ -281,6 +401,7 @@ class MVCPVisualizer(QMainWindow):
 
             self.changed_muscles.update(changed_muscles_this_update)
 
+            # Aktualizace status labelu
             if changed_muscles_this_update:
                 changed_list = ", ".join(changed_muscles_this_update)
                 if 'timestamp' in data:
@@ -293,77 +414,16 @@ class MVCPVisualizer(QMainWindow):
                     timestamp = data['timestamp']
                     self.status_label.setText(f"Status: Data received (no changes) - (Last: {timestamp})")
 
+            # Posun dat do grafu (animace si řeší widget sám)
+            self.update_chart()
+
+            # Uložíme si předchozí hodnoty
+            for m in changed_muscles_this_update:
+                self.previous_mvcp_data[m] = self.mvcp_data[m]
+
         except Exception as e:
             print(f"Error updating data: {e}")
             self.status_label.setText(f"Status: Error processing data - {str(e)}")
-
-    def _ensure_barset_lengths(self):
-        """Ensure each QBarSet has the same length as muscle_groups (kvůli Phase on/off)."""
-        target_len = len(self.muscle_groups)
-        for s in (self.bar_set_green, self.bar_set_orange, self.bar_set_red, self.bar_set_phase):
-            count = s.count()
-            diff = target_len - count
-            if diff > 0:
-                # append missing zeros
-                for _ in range(diff):
-                    s.append(0.0)
-            elif diff < 0:
-                # remove extra items at the end
-                s.remove(target_len, -diff)
-
-    def refresh_chart(self):
-        """Refresh chart when some muscles have changed"""
-        try:
-            if not self.changed_muscles:
-                return
-
-            # plynulá animace – jen upravíme hodnoty, nic nemažeme
-            self.refresh_chart_full()
-
-            for muscle in self.changed_muscles:
-                if muscle in self.mvcp_data:
-                    self.previous_mvcp_data[muscle] = self.mvcp_data[muscle]
-
-            self.changed_muscles.clear()
-
-        except Exception as e:
-            print(f"Error refreshing chart: {e}")
-            self.changed_muscles = {m for m in self.changed_muscles if m in self.muscle_groups}
-            if self.changed_muscles:
-                self.refresh_chart_full()
-                self.changed_muscles.clear()
-
-    def refresh_chart_full(self):
-        try:
-            self._ensure_barset_lengths()
-
-            for idx, muscle in enumerate(self.muscle_groups):
-                value = float(self.mvcp_data.get(muscle, 0.0) or 0.0)
-
-                if muscle == self.phase_key:
-                    g = o = r = 0.0
-                    phase_val = value
-                else:
-                    phase_val = 0.0
-                    if value > 80.0:
-                        g = o = 0.0
-                        r = value
-                    elif value > 50.0:
-                        g = r = 0.0
-                        o = value
-                    else:
-                        o = r = 0.0
-                        g = value
-
-                self.bar_set_green.replace(idx, g)
-                self.bar_set_orange.replace(idx, o)
-                self.bar_set_red.replace(idx, r)
-                self.bar_set_phase.replace(idx, phase_val)
-
-            self.previous_mvcp_data = self.mvcp_data.copy()
-
-        except Exception as e:
-            print(f"Error in full chart refresh: {e}")
 
     def toggle_mvc(self):
         """Toggle MVC set mode (publish mvc_start / mvc_stop)"""
@@ -380,11 +440,6 @@ class MVCPVisualizer(QMainWindow):
             self.reset_mvc_btn.setText("Set MVC")
             self.status_label.setText("Status: MVC capture stopped")
 
-    def get_timestamp(self):
-        """Get current timestamp"""
-        from datetime import datetime
-        return datetime.now().isoformat()
-
     def _to_float_or_none(self, x):
         if x is None:
             return None
@@ -399,12 +454,8 @@ class MVCPVisualizer(QMainWindow):
             return None
 
     def _update_categories(self):
-        """Update X-axis categories to match self.muscle_groups."""
-        try:
-            self.axis_x.clear()
-        except Exception:
-            pass
-        self.axis_x.append(self.muscle_groups)
+        """Jen interní – aktualizace pořadí kategorií pro chart widget."""
+        self.update_chart()
 
     def _enable_phase_column(self):
         if self.phase_key not in self.muscle_groups:
@@ -412,8 +463,6 @@ class MVCPVisualizer(QMainWindow):
             self.mvcp_data[self.phase_key] = getattr(self, "phase_value", 0.0)
             self.previous_mvcp_data[self.phase_key] = self.mvcp_data[self.phase_key]
             self._update_categories()
-            self.changed_muscles.update(self.muscle_groups)
-            # nově: barsety jen natáhneme přes _ensure_barset_lengths() v refresh_chart_full
 
     def _disable_phase_column(self):
         if self.phase_key in self.muscle_groups:
@@ -428,8 +477,6 @@ class MVCPVisualizer(QMainWindow):
                 del self.previous_mvcp_data[self.phase_key]
 
             self._update_categories()
-            self.changed_muscles.update(self.muscle_groups)
-            self.refresh_chart_full()
 
     def toggle_wide_squat(self):
         """Toggle 'wide_squat' exercise set/unset and show/hide Phase column."""
