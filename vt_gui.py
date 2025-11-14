@@ -5,8 +5,15 @@ from typing import Dict, Any
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout,
                                QHBoxLayout, QWidget, QPushButton, QLabel)
 from PySide6.QtCore import QTimer, Signal, QObject, Qt
-from PySide6.QtGui import QFont
-from PySide6.QtCharts import QChart, QChartView, QBarSeries, QBarSet, QBarCategoryAxis, QValueAxis
+from PySide6.QtGui import QFont, QColor
+from PySide6.QtCharts import (
+    QChart,
+    QChartView,
+    QBarSet,
+    QBarCategoryAxis,
+    QValueAxis,
+    QStackedBarSeries,
+)
 import paho.mqtt.client as mqtt
 
 
@@ -32,7 +39,6 @@ class MQTTWorker(QObject):
         """Callback for when MQTT client connects"""
         if rc == 0:
             print("Connected to MQTT broker")
-            # Subscribe to MVCP data topic - adjust this topic as needed
             client.subscribe("virtualtrainer/mvcp")
             client.subscribe("virtualtrainer/data")
         else:
@@ -93,7 +99,7 @@ class MVCPVisualizer(QMainWindow):
 
         # Current MVCP values
         self.mvcp_data: Dict[str, float] = {muscle: 0.0 for muscle in self.muscle_groups}
-        # Previous MVCP values to track changes
+        # Previous MVCP values to track changes (not nutně potřeba, ale necháme)
         self.previous_mvcp_data: Dict[str, float] = {muscle: 0.0 for muscle in self.muscle_groups}
         # Track which specific muscles have changed
         self.changed_muscles = set()
@@ -196,24 +202,33 @@ class MVCPVisualizer(QMainWindow):
         self.chart.setTitle("MVCP by Muscle Group")
         self.chart.setAnimationOptions(QChart.AnimationOption.SeriesAnimations)
 
-        # Create bar series with single bar set
-        self.bar_series = QBarSeries()
+        # Use stacked bar series so that only one colored segment per category is visible
+        self.bar_series = QStackedBarSeries()
 
-        # Create single bar set for all muscles
-        self.bar_set = QBarSet("MVCP Values")
+        # Bar sets for different ranges and Phase
+        self.bar_set_green = QBarSet("≤ 50 %")
+        self.bar_set_orange = QBarSet("> 50 %")
+        self.bar_set_red = QBarSet("> 80 %")
+        self.bar_set_phase = QBarSet("Phase")
 
-        # Initialize with test data to make bars visible
-        initial_values = [0.0, 0.0, 0.0, 0.0]
-        for i, value in enumerate(initial_values):
-            self.mvcp_data[self.muscle_groups[i]] = value
-            self.previous_mvcp_data[self.muscle_groups[i]] = value
-            self.bar_set.append(value)
+        # Colors
+        self.bar_set_green.setColor(QColor("#4CAF50"))   # green
+        self.bar_set_orange.setColor(QColor("#FF9800"))  # orange
+        self.bar_set_red.setColor(QColor("#F44336"))     # red
+        self.bar_set_phase.setColor(QColor("#2196F3"))   # blue for Phase
 
-        # Force initial chart update for all muscles
-        self.changed_muscles = set(self.muscle_groups)
+        # Initialize sets with zeros for existing muscles
+        for _ in self.muscle_groups:
+            self.bar_set_green.append(0.0)
+            self.bar_set_orange.append(0.0)
+            self.bar_set_red.append(0.0)
+            self.bar_set_phase.append(0.0)
 
-        # Add bar set to series
-        self.bar_series.append(self.bar_set)
+        # Add bar sets to series
+        self.bar_series.append(self.bar_set_green)
+        self.bar_series.append(self.bar_set_orange)
+        self.bar_series.append(self.bar_set_red)
+        self.bar_series.append(self.bar_set_phase)
 
         # Add series to chart
         self.chart.addSeries(self.bar_series)
@@ -233,8 +248,8 @@ class MVCPVisualizer(QMainWindow):
         # Create chart view
         self.chart_view = QChartView(self.chart)
 
-        # Initial chart update
-        self.refresh_chart()
+        # Initial full refresh (nastaví hodnoty přes replace)
+        self.refresh_chart_full()
 
     def update_data(self, data):
         """Update MVCP data from MQTT message"""
@@ -248,6 +263,7 @@ class MVCPVisualizer(QMainWindow):
                         if new_value is not None and self.mvcp_data[muscle_name] != new_value:
                             self.mvcp_data[muscle_name] = new_value
                             changed_muscles_this_update.add(muscle_name)
+
             # Handle exercise phase for wide squat
             try:
                 exdesc = data.get('exercise_description') if isinstance(data, dict) else None
@@ -256,20 +272,15 @@ class MVCPVisualizer(QMainWindow):
                     # Map: 0 -> 100 (max), 50 -> 0, 100 -> 100
                     self.phase_value = max(0.0, min(100.0, 2.0 * abs(p - 50.0)))
                     if self.wide_squat_active:
-                        # Ensure column exists and update value
                         if self.phase_key not in self.muscle_groups:
                             self._enable_phase_column()
                         self.mvcp_data[self.phase_key] = self.phase_value
                         changed_muscles_this_update.add(self.phase_key)
-            except Exception as _e:
-                # Phase handling is best-effort; ignore errors
+            except Exception:
                 pass
 
-
-            # Update the set of changed muscles
             self.changed_muscles.update(changed_muscles_this_update)
 
-            # Update status based on changes
             if changed_muscles_this_update:
                 changed_list = ", ".join(changed_muscles_this_update)
                 if 'timestamp' in data:
@@ -278,7 +289,6 @@ class MVCPVisualizer(QMainWindow):
                 else:
                     self.status_label.setText(f"Status: Updated {changed_list}")
             else:
-                # Update status to show data received but unchanged
                 if 'timestamp' in data:
                     timestamp = data['timestamp']
                     self.status_label.setText(f"Status: Data received (no changes) - (Last: {timestamp})")
@@ -287,84 +297,83 @@ class MVCPVisualizer(QMainWindow):
             print(f"Error updating data: {e}")
             self.status_label.setText(f"Status: Error processing data - {str(e)}")
 
+    def _ensure_barset_lengths(self):
+        """Ensure each QBarSet has the same length as muscle_groups (kvůli Phase on/off)."""
+        target_len = len(self.muscle_groups)
+        for s in (self.bar_set_green, self.bar_set_orange, self.bar_set_red, self.bar_set_phase):
+            count = s.count()
+            diff = target_len - count
+            if diff > 0:
+                # append missing zeros
+                for _ in range(diff):
+                    s.append(0.0)
+            elif diff < 0:
+                # remove extra items at the end
+                s.remove(target_len, -diff)
+
     def refresh_chart(self):
-        """Refresh only the bars for muscles that have changed"""
+        """Refresh chart when some muscles have changed"""
         try:
-            # Only update if there are muscles that have changed
             if not self.changed_muscles:
                 return
 
-            # Process each changed muscle individually
-            for muscle in list(self.changed_muscles):
-                if muscle not in self.muscle_groups:
-                    self.changed_muscles.discard(muscle)
-                    continue
+            # plynulá animace – jen upravíme hodnoty, nic nemažeme
+            self.refresh_chart_full()
 
-                muscle_index = self.muscle_groups.index(muscle)
-                value = self.mvcp_data.get(muscle, 0.0)
-
-                # Update the specific bar value
-                if muscle_index < self.bar_set.count():
-                    self.bar_set.replace(muscle_index, value)
-                else:
-                    # If the bar set is not long enough, extend it
-                    while self.bar_set.count() <= muscle_index:
-                        self.bar_set.append(0)
-                    self.bar_set.replace(muscle_index, value)
-
-            # Update previous values for the changed muscles and clear the changed set
             for muscle in self.changed_muscles:
-                self.previous_mvcp_data[muscle] = self.mvcp_data[muscle]
-
-            changed_list = ", ".join(self.changed_muscles)
-#            print(f"Chart updated for muscles: {changed_list}")  # Debug message
+                if muscle in self.mvcp_data:
+                    self.previous_mvcp_data[muscle] = self.mvcp_data[muscle]
 
             self.changed_muscles.clear()
 
         except Exception as e:
             print(f"Error refreshing chart: {e}")
-
             self.changed_muscles = {m for m in self.changed_muscles if m in self.muscle_groups}
-            if not self.changed_muscles:
-                return
-
-            self.refresh_chart_full()
+            if self.changed_muscles:
+                self.refresh_chart_full()
+                self.changed_muscles.clear()
 
     def refresh_chart_full(self):
-        """Fallback method: Full refresh of the entire chart"""
         try:
-            print("Performing full chart refresh")
+            self._ensure_barset_lengths()
 
-            # Clear existing data
-            self.bar_set.remove(0, self.bar_set.count())
+            for idx, muscle in enumerate(self.muscle_groups):
+                value = float(self.mvcp_data.get(muscle, 0.0) or 0.0)
 
-            # Add all muscle values to the single bar set
-            for muscle in self.muscle_groups:
-                value = self.mvcp_data[muscle]
-                self.bar_set.append(value)
+                if muscle == self.phase_key:
+                    g = o = r = 0.0
+                    phase_val = value
+                else:
+                    phase_val = 0.0
+                    if value > 80.0:
+                        g = o = 0.0
+                        r = value
+                    elif value > 50.0:
+                        g = r = 0.0
+                        o = value
+                    else:
+                        o = r = 0.0
+                        g = value
 
-            # Update all previous values
+                self.bar_set_green.replace(idx, g)
+                self.bar_set_orange.replace(idx, o)
+                self.bar_set_red.replace(idx, r)
+                self.bar_set_phase.replace(idx, phase_val)
+
             self.previous_mvcp_data = self.mvcp_data.copy()
 
         except Exception as e:
             print(f"Error in full chart refresh: {e}")
 
-        except Exception as e:
-            print(f"Error refreshing chart: {e}")
-            # Fallback to full refresh if granular update fails
-            self.refresh_chart_full()
-
     def toggle_mvc(self):
         """Toggle MVC set mode (publish mvc_start / mvc_stop)"""
         if not self.is_mvc_setting:
-            # Start MVC capture
             command = {"cmd": "mvc_start"}
             self.mqtt_worker.send_command(command)
             self.is_mvc_setting = True
             self.reset_mvc_btn.setText("Stop MVC")
             self.status_label.setText("Status: MVC capture started")
         else:
-            # Stop MVC capture
             command = {"cmd": "mvc_stop"}
             self.mqtt_worker.send_command(command)
             self.is_mvc_setting = False
@@ -389,82 +398,53 @@ class MVCPVisualizer(QMainWindow):
         except Exception:
             return None
 
-    def _update_categories_and_barset(self):
-        """Ensure axis categories and bar set length match self.muscle_groups."""
-        # Update X-axis categories
+    def _update_categories(self):
+        """Update X-axis categories to match self.muscle_groups."""
         try:
             self.axis_x.clear()
         except Exception:
             pass
         self.axis_x.append(self.muscle_groups)
-        # Ensure bar_set count matches number of categories
-        needed = len(self.muscle_groups)
-        current = self.bar_set.count()
-        if current < needed:
-            for _ in range(needed - current):
-                self.bar_set.append(0.0)
-        elif current > needed:
-            # Remove extra bars from the end
-            try:
-                self.bar_set.remove(needed, current - needed)
-            except Exception:
-                # Fallback: rebuild entire bar_set
-                values = [0.0]*needed
-                for idx, name in enumerate(self.muscle_groups):
-                    if name in self.mvcp_data:
-                        values[idx] = float(self.mvcp_data[name])
-                self.bar_series.remove(self.bar_set)
-                self.bar_set = QBarSet("MVCP Values")
-                for v in values:
-                    self.bar_set.append(v)
-                self.bar_series.append(self.bar_set)
 
     def _enable_phase_column(self):
         if self.phase_key not in self.muscle_groups:
             self.muscle_groups.append(self.phase_key)
             self.mvcp_data[self.phase_key] = getattr(self, "phase_value", 0.0)
             self.previous_mvcp_data[self.phase_key] = self.mvcp_data[self.phase_key]
-            self._update_categories_and_barset()
-            self.changed_muscles.add(self.phase_key)
+            self._update_categories()
+            self.changed_muscles.update(self.muscle_groups)
+            # nově: barsety jen natáhneme přes _ensure_barset_lengths() v refresh_chart_full
 
     def _disable_phase_column(self):
         if self.phase_key in self.muscle_groups:
-            # Remove from categories and data
             try:
-                idx = self.muscle_groups.index(self.phase_key)
+                self.muscle_groups.remove(self.phase_key)
             except ValueError:
-                idx = -1
-            if idx >= 0:
-                del self.muscle_groups[idx]
+                pass
+
             if self.phase_key in self.mvcp_data:
                 del self.mvcp_data[self.phase_key]
             if self.phase_key in self.previous_mvcp_data:
                 del self.previous_mvcp_data[self.phase_key]
-            # Update axis and bar set lengths
-            self._update_categories_and_barset()
-            self.changed_muscles.discard(self.phase_key)
-            # Full refresh to ensure removal is reflected
-            self.refresh_chart_full()
 
+            self._update_categories()
+            self.changed_muscles.update(self.muscle_groups)
+            self.refresh_chart_full()
 
     def toggle_wide_squat(self):
         """Toggle 'wide_squat' exercise set/unset and show/hide Phase column."""
         if not self.wide_squat_active:
-            # Activate wide squat
             command = {"cmd": "set_exercise", "val": "wide_squat"}
             self.mqtt_worker.send_command(command)
             self.wide_squat_active = True
             self.wide_squat_btn.setText("Unset wide squat")
-            # Ensure Phase column is visible
             self._enable_phase_column()
             self.status_label.setText("Status: Wide squat enabled")
         else:
-            # Deactivate wide squat
             command = {"cmd": "set_exercise", "val": ""}
             self.mqtt_worker.send_command(command)
             self.wide_squat_active = False
             self.wide_squat_btn.setText("Set wide squat")
-            # Hide Phase column
             self._disable_phase_column()
             self.status_label.setText("Status: Wide squat disabled")
 
