@@ -249,7 +249,7 @@ class BarChartWidget(QWidget):
             )
 
             # název svalu pod sloupcem
-            painter.setPen(QPen(QColor(50, 50, 50)))
+            painter.setPen(QPen(QColor(200, 200, 200)))
             painter.setFont(QFont("Arial", 9))
             label_rect = QRectF(
                 bar_left - 10,
